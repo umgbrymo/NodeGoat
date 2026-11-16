@@ -63,28 +63,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Crear directorios de reportes
-        run: mkdir -p reports dc-data
+      
       - name: Ejecutar Dependency-Check (CVSS >= 7)
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           if [ -z "$NVD_API_KEY" ]; then
-            echo 'ERROR: falta el secreto NVD_API_KEY. Ver la guia.'
+            echo "ERROR: falta el secreto NVD_API_KEY"
             exit 2
           fi
+
+          mkdir -p reports
+
+          echo "Iniciando OWASP Dependency-Check"
+          echo "Utilizando base de datos aislada del contenedor"
+
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/src:ro" \
             -v "$GITHUB_WORKSPACE/reports:/report" \
-            -v "$GITHUB_WORKSPACE/dc-data:/usr/share/dependency-check/data" \
-            -e NVD_API_KEY="$NVD_API_KEY" \
             owasp/dependency-check:latest \
             --project NodeGoat-Laboratorio \
             --scan /src \
-            --format HTML --format JSON \
+            --format HTML \
+            --format JSON \
             --out /report \
             --nvdApiKey "$NVD_API_KEY" \
             --failOnCVSS 7
+
       - name: Publicar reporte SCA incluso si falla
         if: always()
         uses: actions/upload-artifact@v4
