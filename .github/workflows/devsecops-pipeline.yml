@@ -4,8 +4,6 @@ name: DevSecOps Pipeline - Semana 07
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -17,9 +15,9 @@ concurrency:
 
 jobs:
 
-  # ========================================
-  # JOB 1 - SAST CON SEMGREP
-  # ========================================
+  # =========================================
+  # 1. ANALISIS SAST - SEMGREP
+  # =========================================
   sast:
     name: SAST - Semgrep
     runs-on: ubuntu-latest
@@ -29,7 +27,7 @@ jobs:
       - name: Descargar codigo
         uses: actions/checkout@v4
 
-      - name: Crear directorio de reportes
+      - name: Preparar reportes
         run: mkdir -p reports
 
       - name: Ejecutar Semgrep
@@ -69,7 +67,7 @@ jobs:
               if result.get("level") == "error"
           ]
 
-          print("Hallazgos bloqueantes:", len(findings))
+          print("Hallazgos SAST bloqueantes:", len(findings))
 
           if findings:
               print("QUALITY GATE SAST: FAILED")
@@ -78,9 +76,9 @@ jobs:
           print("QUALITY GATE SAST: SUCCESS")
           PY
 
-  # ========================================
-  # JOB 2 - SBOM CYCLONEDX
-  # ========================================
+  # =========================================
+  # 2. GENERACION DE SBOM
+  # =========================================
   sbom:
     name: SBOM - CycloneDX
     runs-on: ubuntu-latest
@@ -90,7 +88,7 @@ jobs:
       - name: Descargar codigo
         uses: actions/checkout@v4
 
-      - name: Generar SBOM con Syft
+      - name: Generar SBOM
         uses: anchore/sbom-action@v0
         with:
           path: .
@@ -105,9 +103,9 @@ jobs:
           path: sbom.cyclonedx.json
           if-no-files-found: error
 
-  # ========================================
-  # JOB 3 - SCA DEPENDENCY-CHECK
-  # ========================================
+  # =========================================
+  # 3. ANALISIS SCA - DEPENDENCY-CHECK
+  # =========================================
   sca:
     name: SCA - OWASP Dependency-Check
     runs-on: ubuntu-latest
@@ -133,21 +131,35 @@ jobs:
         run: |
           mkdir -p reports
           mkdir -p dc-data
+          chmod 777 dc-data
+          chmod 777 reports
 
-      # Recuperar la ultima base de datos
-      # guardada correctamente.
+      # Solo se restauran caches creadas
+      # tras una actualizacion exitosa.
       - name: Restaurar cache NVD
-        id: nvd-cache
         uses: actions/cache/restore@v4
         with:
           path: dc-data
-          key: nvd-${{ runner.os }}-${{ github.run_id }}
+          key: nvd-h2-v2-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            nvd-${{ runner.os }}-
+            nvd-h2-v2-${{ runner.os }}-
 
-      # Actualizar NVD antes de escanear.
-      # Un error aqui es tecnico, no un
-      # hallazgo de vulnerabilidad.
+      - name: Verificar directorio NVD
+        run: |
+          mkdir -p dc-data
+          chmod -R a+rwX dc-data
+
+          echo "Contenido del directorio NVD:"
+          ls -lah dc-data
+
+          echo "Verificando archivos de bloqueo"
+          find dc-data -type f \
+            \( -name '*.lock' -o -name '*.lock.db' \) \
+            -print
+
+          # No debe haber otro proceso
+          # utilizando esta base en el runner.
+
       - name: Actualizar base de datos NVD
         id: nvd-update
         env:
@@ -158,7 +170,7 @@ jobs:
             exit 2
           fi
 
-          echo "Actualizando base NVD..."
+          echo "Iniciando actualizacion NVD"
 
           docker run --rm \
             -v "$GITHUB_WORKSPACE/dc-data:/usr/share/dependency-check/data" \
@@ -171,26 +183,19 @@ jobs:
                 --data /usr/share/dependency-check/data \
                 --nvdApiKey "$NVD_API_KEY" \
                 --nvdApiDelay 8000 \
-                --nvdMaxRetryCount 10 \
-                --nvdApiResultsPerPage 1000
+                --nvdMaxRetryCount 5
             '
 
-      # Guardar la cache solamente si
-      # la actualizacion fue exitosa.
       - name: Guardar cache NVD
         if: steps.nvd-update.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: dc-data
-          key: nvd-${{ runner.os }}-${{ github.run_id }}
+          key: nvd-h2-v2-${{ runner.os }}-${{ github.run_id }}
 
-      # El analisis no vuelve a consultar
-      # actualizaciones NVD.
       - name: Ejecutar Dependency-Check
-        env:
-          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
-          echo "Iniciando analisis SCA"
+          echo "Ejecutando analisis SCA"
 
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/src:ro" \
