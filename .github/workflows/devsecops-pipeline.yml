@@ -1,82 +1,143 @@
-name: DevSecOps - SAST SCA SBOM
+
+name: DevSecOps Pipeline - Semana 07
+
 on:
   push:
-    branches: [master, main]
+    branches: [main, master]
   pull_request:
-    branches: [master, main]
+    branches: [main, master]
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
+
+  # ==========================================
+  # JOB 1: SAST CON SEMGREP
+  # ==========================================
   sast:
-    name: SAST Semgrep
+    name: SAST - Semgrep
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Instalar Semgrep
-        run: python -m pip install --upgrade semgrep
-      - name: Analizar y generar JSON
-        run: semgrep scan --config p/security-audit --json --output semgrep-results.json .
-      - name: Publicar reporte SAST
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Ejecutar Semgrep
+        run: |
+          mkdir -p reports
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            semgrep/semgrep:latest \
+            semgrep scan \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --sarif \
+            --output reports/semgrep.sarif
+
+      - name: Publicar reporte Semgrep
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: semgrep-json
-          path: semgrep-results.json
+          name: semgrep-sarif-report
+          path: reports/semgrep.sarif
           if-no-files-found: warn
-      - name: Quality gate SAST (ERROR)
+
+      - name: Quality Gate SAST
         run: |
-          python - <<'PYCODE'
-          import json, sys
-          with open('semgrep-results.json', encoding='utf-8') as f:
-              report = json.load(f)
-          findings = [r for r in report.get('results', [])
-                      if r.get('extra', {}).get('severity', '').upper() == 'ERROR']
-          print(f'Hallazgos Semgrep ERROR: {len(findings)}')
-          for r in findings[:20]:
-              print(r.get('check_id'), r.get('path'), r.get('start', {}).get('line'))
-          sys.exit(1 if findings else 0)
-          PYCODE
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("reports/semgrep.sarif", encoding="utf-8") as f:
+              data = json.load(f)
+
+          findings = [
+              result
+              for run in data.get("runs", [])
+              for result in run.get("results", [])
+              if result.get("level") == "error"
+          ]
+
+          print(f"Hallazgos SAST bloqueantes: {len(findings)}")
+
+          if findings:
+              print("QUALITY GATE SAST: FAILED")
+              sys.exit(1)
+
+          print("QUALITY GATE SAST: SUCCESS")
+          PY
+
+  # ==========================================
+  # JOB 2: GENERACION DE SBOM
+  # ==========================================
   sbom:
-    name: SBOM CycloneDX
+    name: SBOM - CycloneDX
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
       - name: Generar SBOM con Syft
         uses: anchore/sbom-action@v0
         with:
           path: .
           format: cyclonedx-json
           output-file: sbom.cyclonedx.json
-          artifact-name: sbom-cyclonedx
-      - name: Validar archivo SBOM
-        run: |
-          python - <<'PYCODE'
-          import json
-          with open('sbom.cyclonedx.json', encoding='utf-8') as f:
-              sbom=json.load(f)
-          assert sbom.get('bomFormat') == 'CycloneDX', 'Formato incorrecto'
-          print('Componentes:', len(sbom.get('components', [])))
-          PYCODE
+          upload-artifact: false
+
+      - name: Publicar SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cyclonedx.json
+          if-no-files-found: error
+
+  # ==========================================
+  # JOB 3: SCA CON DEPENDENCY-CHECK
+  # ==========================================
   sca:
-    name: SCA OWASP Dependency-Check
+    name: SCA - OWASP Dependency-Check
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Ejecutar Dependency-Check (CVSS >= 7)
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar dependencias
+        run: |
+          npm ci \
+            --ignore-scripts \
+            --no-audit \
+            --legacy-peer-deps
+
+      - name: Preparar directorios
+        run: |
+          mkdir -p reports
+          mkdir -p dc-data
+
+      - name: Ejecutar Dependency-Check
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           if [ -z "$NVD_API_KEY" ]; then
-            echo "ERROR: falta el secreto NVD_API_KEY"
+            echo "::error::Falta NVD_API_KEY"
             exit 2
           fi
 
-          mkdir -p reports
-
-          echo "Iniciando OWASP Dependency-Check"
-          echo "Utilizando base de datos aislada del contenedor"
+          echo "Iniciando analisis SCA"
 
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/src:ro" \
@@ -90,10 +151,10 @@ jobs:
             --nvdApiKey "$NVD_API_KEY" \
             --failOnCVSS 7
 
-      - name: Publicar reporte SCA incluso si falla
+      - name: Publicar reportes SCA
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dependency-check-reports
+          name: dependency-check-report
           path: reports/
           if-no-files-found: warn
